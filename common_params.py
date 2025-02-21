@@ -56,6 +56,6 @@ params_3d = {
     "time_manager": pp.TimeManager([0, 100], 10, constant_dt=True),
     "reference_variable_values": reference_variable_values,
 }
-base_path = "results/production_run_comparison_REV_DNM/00_raw_data/02_REV_Ivar/"
+base_path = "results/"
 cells = [45 * 2**i for i in range(6)]
 dts = [10 * 2.0 ** (-i) for i in range(6)]

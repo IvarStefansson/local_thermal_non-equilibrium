@@ -1354,7 +1354,7 @@ class NonzeroInitialCondition(pp.PorePyModel):
         val = self.reference_variable_values.pressure
         return val * np.ones(sd.num_cells)
 
-    def ic_values_solid_temperature(self, sd: pp.Grid) -> np.ndarray:
+    def ic_values_temperature(self, sd: pp.Grid) -> np.ndarray:
         val = self.reference_variable_values.temperature
         return val * np.ones(sd.num_cells)
 
