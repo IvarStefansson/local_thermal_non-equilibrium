@@ -35,13 +35,13 @@ if __name__ == "__main__":
     fluid = LTDFluid(**fluid_vals_3d)
     for model_name, model_class in model_dict.items():
 
-        def run_model(nc, dt):
+        def run_model(nc: int, dt: float):
+            """Run the model for a given number of cells and time step."""
             case = f"{model_name}_ncx_{nc}_dt_{dt}"
             params_loc = copy.deepcopy(params_3d)
             params_loc.update(
                 {
                     "material_constants": {"solid": solid, "fluid": fluid},
-                    "folder_name": f"results/{case}",
                     "num_cells_x": nc,
                     "time_manager": pp.TimeManager([0, 100], dt, constant_dt=True),
                     "times_to_export": [],
@@ -50,6 +50,7 @@ if __name__ == "__main__":
             model = model_class(params_loc)
 
             pp.run_time_dependent_model(model, params_loc)
+            # Save the results.
             model.exporter.write_pvd()
             for phase, name in zip(["solid", "fluid"], ["solid", "void"]):
                 pth = base_path + f"output_data_REV_{name}_{case}.csv"
@@ -58,8 +59,10 @@ if __name__ == "__main__":
                     pth, vals, delimiter=",", header="Time,X-coordinate,Temperature"
                 )
 
+        # Run the model for different number of cells and the smallest time step.
         for nc in cells:
             run_model(nc, dts[-1])
 
+        # Run the model for the smallest cells size and different time steps.
         for dt in dts:
             run_model(cells[-1], dt)

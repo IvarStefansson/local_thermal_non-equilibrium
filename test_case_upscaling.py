@@ -22,7 +22,8 @@ if __name__ == "__main__":
         solid = LTDSolid(**solid_vals_3d)
         fluid = LTDFluid(**fluid_vals_3d)
 
-        def run_upscaling_model(nc, dt):
+        def run_upscaling_model(nc: int, dt: float):
+            """Run the model for a given number of cells and time step."""
             # Label the test case.
             case = f"upscaling_h_{h}_ncx_{nc}_dt_{dt}"
             params_loc = copy.deepcopy(params_3d)
@@ -30,7 +31,6 @@ if __name__ == "__main__":
             params_loc.update(
                 {
                     "material_constants": {"solid": solid, "fluid": fluid},
-                    "folder_name": f"results/test_case_3d_{case}",
                     "num_cells_x": nc,
                     "time_manager": pp.TimeManager([0, 100], dt, constant_dt=True),
                     "times_to_export": [],
@@ -48,10 +48,10 @@ if __name__ == "__main__":
                     pth, vals, delimiter=",", header="Time,X-coordinate,Temperature"
                 )
 
-        # Spatial convergence
+        # Run the model for different number of cells and the smallest time step.
         for nc in cells:
             run_upscaling_model(nc, dts[-1])
 
-        # Temporal convergence
+        # Run the model for the smallest cells size and different time steps.
         for dt in dts:
             run_upscaling_model(cells[-1], dt)

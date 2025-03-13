@@ -19,7 +19,8 @@ if __name__ == "__main__":
     # LTEAdjustments.
     solid_vals_3d["thermal_conductivity"] = 2.411111344
 
-    def run_lte_model(nc, dt):
+    def run_lte_model(nc: int, dt: float):
+        """Run the LTE model for a given number of cells and time step."""
         solid = LTDSolid(**solid_vals_3d)
         fluid = LTDFluid(**fluid_vals_3d)
         params_loc = copy.deepcopy(params_3d)
@@ -28,12 +29,10 @@ if __name__ == "__main__":
         params_loc.update(
             {
                 "material_constants": {"solid": solid, "fluid": fluid},
-                "folder_name": f"results/test_case_lte_{case}",
                 "file_name": case,
                 "num_cells_x": nc,
-                "num_cells_yz": 1,
                 "time_manager": pp.TimeManager([0, 100], dt, constant_dt=True),
-                "times_to_export": np.linspace(0, 100, 6),
+                "times_to_export": [],
             }
         )
 
@@ -44,8 +43,10 @@ if __name__ == "__main__":
         vals = model.results["temperature"]
         np.savetxt(pth, vals, delimiter=",", header="Time,X-coordinate,Temperature")
 
+    # Run the model for different number of cells and the smallest time step.
     for nc in cells:
         run_lte_model(nc, dts[-1])
 
+    # Run the model for the smallest cells size and different time steps.
     for dt in dts:
         run_lte_model(cells[-1], dt)
