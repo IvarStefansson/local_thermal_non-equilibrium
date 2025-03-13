@@ -14,7 +14,7 @@ solid_vals = {
 solid_vals_3d = solid_vals.copy()
 solid_vals_3d.update(
     {
-        "permeability": 2.03698e-11,
+        "permeability": 4.13e-11,
         "energy_exchange_number": 0.5,
         "porosity": 0.25446,
         "pore_size": 3.58586e-4,

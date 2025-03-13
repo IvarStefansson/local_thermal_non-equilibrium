@@ -14,14 +14,14 @@ from common_params import (
 from energy_balances import (
     LTDFluid,
     LTDSolid,
-    ThermalParametersNuskeNoFlow,
+    ThermalParametersNuske,
     ThermalParametersNakayama,
     AdditonalTermNakayama,
 )
 from model_setup import SingleDim3dModelLTNE
 
 
-class Nuske(ThermalParametersNuskeNoFlow, SingleDim3dModelLTNE):
+class Nuske(ThermalParametersNuske, SingleDim3dModelLTNE):
     pass
 
 
@@ -44,7 +44,7 @@ if __name__ == "__main__":
                     "folder_name": f"results/{case}",
                     "num_cells_x": nc,
                     "time_manager": pp.TimeManager([0, 100], dt, constant_dt=True),
-                    "times_to_export": np.linspace(0, 100, 6),
+                    "times_to_export": [],
                 }
             )
             model = model_class(params_loc)

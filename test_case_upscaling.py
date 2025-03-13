@@ -33,7 +33,7 @@ if __name__ == "__main__":
                     "folder_name": f"results/test_case_3d_{case}",
                     "num_cells_x": nc,
                     "time_manager": pp.TimeManager([0, 100], dt, constant_dt=True),
-                    "times_to_export": np.linspace(0, 100, 6),
+                    "times_to_export": [],
                 }
             )
             # Run the model.

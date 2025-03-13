@@ -15,10 +15,98 @@ import porepy as pp
 import scipy.sparse as sps
 from porepy.applications.discretizations.flux_discretization import FluxDiscretization
 from porepy.models.protocol import PorePyModel
+import porepy.models.energy_balance as eb
 from materials import LTDFluid, LTDSolid
 
 
-class EnergyBalanceEquationsLTNE(pp.energy_balance.TotalEnergyBalanceEquations):
+def create_class_with_method_from(
+    base_class: type,
+    method_name: str,
+    donor_class: type,
+):
+    """Create a new class inheriting from base_class, but with method_name
+    implementation taken from donor_class, adjusted for MRO safety.
+
+    Parameters:
+        base_class: The class to inherit from.
+        method_name: The name of the method to be inherited from donor_class.
+        donor_class: The class from which to take the method implementation.
+
+    Returns:
+        A new class that inherits from base_class and has the method from donor_class.
+    """
+    # Get the method from the donor class.
+    if not hasattr(donor_class, method_name):
+        raise AttributeError(
+            f"{donor_class.__name__} does not have method '{method_name}'"
+        )
+
+    donor_method = getattr(donor_class, method_name)
+
+    # Create a wrapper method that preserves the correct MRO for super() calls.
+    def wrapped_method(self, *args, **kwargs):
+        # Store the original __class__ attribute.
+        original_class = self.__class__
+
+        # Temporarily modify the instance's __class__ to mimic donor's inheritance.
+        class_dict = {
+            "__class__": type(
+                "Temporary",
+                (donor_class,)
+                + tuple(cls for cls in original_class.mro() if cls is not donor_class),
+                {},
+            )
+        }
+
+        original_dict = {}
+        for key in class_dict:
+            if hasattr(self, key):
+                original_dict[key] = getattr(self, key)
+            setattr(self, key, class_dict[key])
+
+        try:
+            # Call the donor method with the modified __class__
+            result = donor_method(self, *args, **kwargs)
+            return result
+        finally:
+            # Restore the original attributes
+            for key in class_dict:
+                if key in original_dict:
+                    setattr(self, key, original_dict[key])
+                else:
+                    delattr(self, key)
+
+    class_name = (
+        f"{base_class.__name__}With{donor_class.__name__}{method_name.capitalize()}"
+    )
+
+    # Create the new class with the wrapped method.
+    new_class = type(class_name, (base_class,), {method_name: wrapped_method})
+
+    return new_class
+
+
+def extend_class_with_methods(
+    target_cls: type,
+    source_cls: type,
+    method_names: list[str],
+):
+    """Extends a class with methods from another class.
+
+    Parameters:
+        target_cls: The class to extend.
+        source_cls: The class to inherit methods from.
+        method_names: List of method names to inherit.
+
+    Returns:
+        A new class that inherits from target_cls and has methods from source_cls.
+    """
+    for method_name in method_names:
+        target_cls = create_class_with_method_from(target_cls, method_name, source_cls)
+    return target_cls
+
+
+class _EnergyBalanceEquationsLTNE(pp.BalanceEquation):
     """Mixed-dimensional energy balance equation.
 
     Balance equation for all subdomains and advective and diffusive fluxes internally
@@ -56,6 +144,7 @@ class EnergyBalanceEquationsLTNE(pp.energy_balance.TotalEnergyBalanceEquations):
         fluxes are set for each interface of codimension one.
 
         """
+        super().set_equations()
         subdomains = self.mdg.subdomains()
         nd_subdomains = self.mdg.subdomains(dim=self.nd)
         interfaces = self.mdg.interfaces(codim=1)
@@ -97,6 +186,7 @@ class EnergyBalanceEquationsLTNE(pp.energy_balance.TotalEnergyBalanceEquations):
             nd_subdomains
         ) @ self.fluid_solid_energy_exchange(nd_subdomains)
         source = self.energy_source(subdomains) + f_s
+        # Source term is _subtracted_ from other terms.
         eq = self.balance_equation(subdomains, accumulation, flux, source, dim=1)
         eq.set_name("fluid_energy_balance_equation")
         return eq
@@ -152,6 +242,161 @@ class EnergyBalanceEquationsLTNE(pp.energy_balance.TotalEnergyBalanceEquations):
         ) * self.porosity(subdomains)
         energy.set_name("fluid_internal_energy")
         return energy
+
+
+EnergyBalanceEquationsLTNE = extend_class_with_methods(
+    _EnergyBalanceEquationsLTNE,
+    eb.TotalEnergyBalanceEquations,
+    [
+        "solid_internal_energy",
+        "advection_weight_energy_balance",
+        "interface_enthalpy_flux_equation",
+        "well_enthalpy_flux_equation",
+        "enthalpy_flux",
+        "energy_source",
+    ],
+)
+
+
+class VariablesEnergyBalanceLTD(PorePyModel):
+    """
+    Creates necessary variables (temperatures, advective and diffusive interface flux)
+    and provides getter methods for these and their reference values. Getters construct
+    mixed-dimensional variables on the fly, and can be called on any subset of the grids
+    where the variable is defined. Setter method (assign_variables), however, must
+    create on all grids where the variable is to be used.
+
+    """
+
+    def create_variables(self) -> None:
+        """Assign primary variables to subdomains and interfaces of the
+        mixed-dimensional grid.
+
+        """
+        super().create_variables()
+        self.equation_system.create_variables(
+            self.solid_temperature_variable,
+            subdomains=self.mdg.subdomains(dim=self.nd),
+            tags={"si_units": "K"},
+        )
+        self.equation_system.create_variables(
+            self.fluid_temperature_variable,
+            subdomains=self.mdg.subdomains(),
+            tags={"si_units": "K"},
+        )
+        self.equation_system.create_variables(
+            self.interface_fourier_flux_variable,
+            interfaces=self.mdg.interfaces(codim=1),
+            tags={"si_units": "W"},
+        )
+        self.equation_system.create_variables(
+            self.interface_enthalpy_flux_variable,
+            interfaces=self.mdg.interfaces(codim=1),
+            tags={"si_units": "W"},
+        )
+        self.equation_system.create_variables(
+            self.well_enthalpy_flux_variable,
+            interfaces=self.mdg.interfaces(codim=2),
+            tags={"si_units": "W"},
+        )
+
+    def temperature(self, subdomains: list[pp.Grid]) -> pp.ad.MixedDimensionalVariable:
+        """Temperature variable. For now, equate LTE temperature to fluid temperature.
+
+        Parameters:
+            subdomains: List of subdomains.
+
+        Returns:
+            Mixed-dimensional variable representing the temperature.
+
+        """
+        return self.fluid_temperature(subdomains)
+
+    def fluid_temperature(self, domains: pp.SubdomainsOrBoundaries) -> pp.ad.Operator:
+        """Fluid temperature variable.
+
+        Parameters:
+            subdomains: List of subdomains or list of boundary grids.
+
+        Returns:
+            Mixed-dimensional variable representing the fluid temperature.
+
+        """
+        if len(domains) > 0 and all([isinstance(g, pp.BoundaryGrid) for g in domains]):
+            return self.create_boundary_operator(
+                name=self.fluid_temperature_variable, domains=domains
+            )
+        t = self.equation_system.md_variable(self.fluid_temperature_variable, domains)
+        return t
+
+    def solid_temperature(self, domains: pp.SubdomainsOrBoundaries) -> pp.ad.Operator:
+        """Solid temperature variable.
+
+        Parameters:
+            subdomains: List of subdomains.
+
+        Returns:
+            Mixed-dimensional variable representing the solid temperature.
+
+        """
+        if len(domains) > 0 and all([isinstance(g, pp.BoundaryGrid) for g in domains]):
+            return self.create_boundary_operator(
+                name=self.solid_temperature_variable, domains=domains
+            )
+        else:
+            return self.equation_system.md_variable(
+                self.solid_temperature_variable, domains
+            )
+
+    def interface_fourier_flux(
+        self, interfaces: list[pp.MortarGrid]
+    ) -> pp.ad.MixedDimensionalVariable:
+        """Interface Fourier flux.
+
+        Parameters:
+            interfaces: List of interface grids.
+
+        Returns:
+            Variable representing the interface Fourier flux.
+
+        """
+        flux = self.equation_system.md_variable(
+            self.interface_fourier_flux_variable, interfaces
+        )
+        return flux
+
+    def interface_enthalpy_flux(
+        self, interfaces: list[pp.MortarGrid]
+    ) -> pp.ad.MixedDimensionalVariable:
+        """Interface enthalpy flux.
+
+        Parameters:
+            interfaces: List of interface grids.
+
+        Returns:
+            Variable representing the interface enthalpy flux.
+        """
+        flux = self.equation_system.md_variable(
+            self.interface_enthalpy_flux_variable, interfaces
+        )
+        return flux
+
+    def well_enthalpy_flux(
+        self, interfaces: list[pp.MortarGrid]
+    ) -> pp.ad.MixedDimensionalVariable:
+        """Well enthalpy flux.
+
+        Parameters:
+            interfaces: List of interface grids.
+
+        Returns:
+            Variable representing the well enthalpy flux.
+
+        """
+        flux = self.equation_system.md_variable(
+            self.well_enthalpy_flux_variable, interfaces
+        )
+        return flux
 
 
 class FouriersLawLTNE(pp.constitutive_laws.FouriersLaw):
@@ -261,7 +506,79 @@ class FouriersLawLTNE(pp.constitutive_laws.FouriersLaw):
         return op
 
 
-class ThermalParametersNakayama(PorePyModel):
+class CharacteristicNumbersLTNE(PorePyModel):
+    def prandtl_number(self, subdomains: list[pp.Grid]) -> pp.ad.Scalar:
+        """Prandtl number [-].
+
+        Parameters:
+            subdomains: List of subdomains.
+
+        Returns:
+            Operator representing the Prandtl number.
+
+        """
+        # https://en.wikipedia.org/wiki/Prandtl_number
+        fl = self.fluid.reference_component
+        return pp.ad.Scalar(
+            fl.specific_heat_capacity * fl.viscosity / fl.thermal_conductivity
+        )
+
+    def reynolds_number(self, subdomains: list[pp.Grid]) -> pp.ad.Operator:
+        """Reynolds number [-].
+
+        Parameters:
+            subdomains: List of subdomains.
+
+        Returns:
+            Operator representing the Reynolds number.
+
+        """
+        # https://en.wikipedia.org/wiki/Reynolds_number
+        f_abs = pp.ad.Function(pp.ad.functions.abs, "velocity magnitude")
+        face_velocity = f_abs(self.fluid_flux(subdomains))
+        mat = []
+        face_areas = []
+        for sd in subdomains:
+            f2c = np.abs(sd.divergence(dim=1))
+            # Find number of faces for each cell
+            n_faces = np.sum(f2c != 0, axis=1)
+            # Divide by number of faces
+            w = 1 / n_faces
+            # Append f2c with weights
+            mat.append(sps.diags(w.A.ravel(), 0) * f2c)
+            # w = 1 / np.sum(f2c, axis=1)
+            # mat.append(f2c * sps.diags(w[:, 0]))
+            face_areas.append(sd.face_areas)
+        # average_weight = pp.ad.DenseArray(np.concatenate(weight), "average_weight")
+        # area and mvem function
+        face_to_cell = pp.ad.SparseArray(sps.block_diag(mat), "face_to_cell")
+        face_areas = pp.ad.DenseArray(np.concatenate(face_areas), "face_areas")
+        mu = pp.ad.Scalar(self.fluid.reference_component.viscosity)
+        cell_velocity = face_to_cell @ (face_velocity / face_areas / mu)
+        return cell_velocity * pp.ad.Scalar(self.solid.pore_size)
+
+    def nusselt_number(self, subdomains: list[pp.Grid]) -> pp.ad.Scalar:
+        """Nusselt number [-].
+
+        Parameters:
+            subdomains: List of subdomains.
+
+        Returns:
+            Operator representing the Nusselt number.
+
+        """
+        # https://en.wikipedia.org/wiki/Nusselt_number
+
+        # Add small value to avoid division by zero.
+        reynolds = self.reynolds_number(subdomains) + pp.ad.Scalar(1e-18)
+        nusselt = pp.ad.Scalar(2.0) + pp.ad.Scalar(1.1) * (
+            reynolds ** pp.ad.Scalar(0.6)
+        ) * (self.prandtl_number(subdomains) ** pp.ad.Scalar(1 / 3))
+        nusselt.set_name("Nusselt_number")
+        return nusselt
+
+
+class ThermalParametersNakayama(CharacteristicNumbersLTNE):
     """Thermal conductivity in the local thermal dynamics.
 
     Interacts with the rest of the model through calls in set_discretization_parameters.
@@ -383,7 +700,8 @@ class ThermalParametersNakayama(PorePyModel):
         a.set_name("fluid_solid_interfacial_area")
         k_f = pp.ad.Scalar(self.fluid.reference_component.thermal_conductivity)
         L = pp.ad.Scalar(self.solid.pore_size)
-        return k_f / L * a * 2
+        coeff = k_f / L * a
+        return coeff * self.nusselt_number(subdomains)
 
 
 class AdditonalTermNakayama:
@@ -568,7 +886,7 @@ class AdditonalTermNakayama:
         return op
 
 
-class ThermalParametersNuskeNoFlow:
+class ThermalParametersNuske(CharacteristicNumbersLTNE):
     r"""Porosity weighted thermal conductivity.
 
     Interface coefficient is
@@ -630,7 +948,10 @@ class ThermalParametersNuskeNoFlow:
         a.set_name("fluid_solid_interfacial_area")
         k = self.effective_thermal_conductivity(subdomains)
         L = pp.ad.Scalar(self.solid.pore_size)
-        return k / L * a
+        coeff = k / L * a
+        f_e = pp.ad.Scalar(self.solid.nuske_f_e)
+
+        return f_e * coeff * self.nusselt_number(subdomains)
 
     def effective_thermal_conductivity(
         self, subdomains: list[pp.Grid]
@@ -648,73 +969,21 @@ class ThermalParametersNuskeNoFlow:
         k_s = pp.ad.Scalar(self.solid.thermal_conductivity)
         return (pp.ad.Scalar(2) * k_f * k_s) / (k_f + k_s)
 
-    def prandtl_number(self, subdomains: list[pp.Grid]) -> pp.ad.Scalar:
-        """Prandtl number [-].
+
+class ThermalParametersNuskeNoFlow(ThermalParametersNuske):
+    """No flow in the model."""
+
+    def fluid_flux(self, subdomains: list[pp.Grid]) -> pp.ad.Operator:
+        """Fluid flux [m^3/s].
 
         Parameters:
             subdomains: List of subdomains.
 
         Returns:
-            Operator representing the Prandtl number.
+            Operator representing the fluid flux.
 
         """
-        # https://en.wikipedia.org/wiki/Prandtl_number
-        fl = self.fluid.reference_component
-        return pp.ad.Scalar(
-            fl.specific_heat_capacity * fl.viscosity / fl.thermal_conductivity
-        )
-
-    def reynolds_number(self, subdomains: list[pp.Grid]) -> pp.ad.Operator:
-        """Reynolds number [-].
-
-        Parameters:
-            subdomains: List of subdomains.
-
-        Returns:
-            Operator representing the Reynolds number.
-
-        """
-        # https://en.wikipedia.org/wiki/Reynolds_number
-        f_abs = pp.ad.Function(pp.ad.functions.abs, "velocity magnitude")
-        face_velocity = f_abs(self.fluid_flux(subdomains))
-        mat = []
-        face_areas = []
-        for sd in subdomains:
-            f2c = np.abs(pp.fvutils.scalar_divergence(sd))
-            # Find number of faces for each cell
-            n_faces = np.sum(f2c != 0, axis=1)
-            # Divide by number of faces
-            w = 1 / n_faces
-            # Append f2c with weights
-            mat.append(sps.diags(w.A.ravel(), 0) * f2c)
-            # w = 1 / np.sum(f2c, axis=1)
-            # mat.append(f2c * sps.diags(w[:, 0]))
-            face_areas.append(sd.face_areas)
-        # average_weight = pp.ad.DenseArray(np.concatenate(weight), "average_weight")
-        # area and mvem function
-        face_to_cell = pp.ad.SparseArray(sps.block_diag(mat), "face_to_cell")
-        face_areas = pp.ad.DenseArray(np.concatenate(face_areas), "face_areas")
-        mu = pp.ad.Scalar(self.fluid.reference_component.viscosity)
-        cell_velocity = face_to_cell @ (face_velocity / face_areas / mu)
-
-        return cell_velocity * pp.ad.Scalar(self.solid.pore_size)
-
-    def nusselt_number(self, subdomains: list[pp.Grid]) -> pp.ad.Scalar:
-        """Nusselt number [-].
-
-        Parameters:
-            subdomains: List of subdomains.
-
-        Returns:
-            Operator representing the Nusselt number.
-
-        """
-        # https://en.wikipedia.org/wiki/Nusselt_number
-        nusselt = pp.ad.Scalar(2) + pp.ad.Scalar(1.1) * (
-            self.reynolds_number(subdomains)  # ** pp.ad.Scalar(0.6)
-        ) * (self.prandtl_number(subdomains) ** pp.ad.Scalar(1 / 3))
-        nusselt.set_name("Nusselt_number")
-        return nusselt
+        return pp.ad.Scalar(0)
 
 
 class ThermalParametersUpscaling(pp.constitutive_laws.ThermalConductivityLTE):
@@ -810,7 +1079,10 @@ class EnthalpyLTNE(pp.constitutive_laws.EnthalpyFromTemperature):
 
         """
         c = self.solid_specific_heat_capacity(subdomains)
-        enthalpy = c * self.perturbation_from_reference("temperature", subdomains)
+        enthalpy = c * (
+            self.solid_temperature(subdomains)
+            - pp.ad.Scalar(self.reference_variable_values.temperature)
+        )
         enthalpy.set_name("solid_enthalpy")
         return enthalpy
 
@@ -832,153 +1104,6 @@ class ConstitutiveLawsLTNE(
     """Mixin class for constitutive laws for the LTD model."""
 
     pass
-
-
-class VariablesEnergyBalanceLTD(PorePyModel):
-    """
-    Creates necessary variables (temperatures, advective and diffusive interface flux)
-    and provides getter methods for these and their reference values. Getters construct
-    mixed-dimensional variables on the fly, and can be called on any subset of the grids
-    where the variable is defined. Setter method (assign_variables), however, must
-    create on all grids where the variable is to be used.
-
-    Note:
-        Wrapping in class methods and not calling equation_system directly allows for
-        easier changes of primary variables. As long as all calls to enthalpy_flux()
-        accept Operators as return values, we can in theory add it as a primary variable
-        and solved mixed form. Similarly for different formulations of enthalpy instead
-        of temperature.
-
-    """
-
-    def create_variables(self) -> None:
-        """Assign primary variables to subdomains and interfaces of the
-        mixed-dimensional grid.
-
-        """
-        self.equation_system.create_variables(
-            self.solid_temperature_variable,
-            subdomains=self.mdg.subdomains(dim=self.nd),
-            tags={"si_units": "K"},
-        )
-        self.equation_system.create_variables(
-            self.fluid_temperature_variable,
-            subdomains=self.mdg.subdomains(),
-            tags={"si_units": "K"},
-        )
-        self.equation_system.create_variables(
-            self.interface_fourier_flux_variable,
-            interfaces=self.mdg.interfaces(codim=1),
-            tags={"si_units": "W"},
-        )
-        self.equation_system.create_variables(
-            self.interface_enthalpy_flux_variable,
-            interfaces=self.mdg.interfaces(codim=1),
-            tags={"si_units": "W"},
-        )
-        self.equation_system.create_variables(
-            self.well_enthalpy_flux_variable,
-            interfaces=self.mdg.interfaces(codim=2),
-            tags={"si_units": "W"},
-        )
-
-    def temperature(self, subdomains: list[pp.Grid]) -> pp.ad.MixedDimensionalVariable:
-        """Temperature variable. For now, equate LTE temperature to fluid temperature.
-
-        Parameters:
-            subdomains: List of subdomains.
-
-        Returns:
-            Mixed-dimensional variable representing the temperature.
-
-        """
-        return self.fluid_temperature(subdomains)
-
-    def fluid_temperature(self, domains: pp.SubdomainsOrBoundaries) -> pp.ad.Operator:
-        """Fluid temperature variable.
-
-        Parameters:
-            subdomains: List of subdomains or list of boundary grids.
-
-        Returns:
-            Mixed-dimensional variable representing the fluid temperature.
-
-        """
-        if len(domains) > 0 and all([isinstance(g, pp.BoundaryGrid) for g in domains]):
-            return self.create_boundary_operator(
-                name=self.fluid_temperature_variable, domains=domains
-            )
-        t = self.equation_system.md_variable(self.fluid_temperature_variable, domains)
-        return t
-
-    def solid_temperature(self, domains: pp.SubdomainsOrBoundaries) -> pp.ad.Operator:
-        """Solid temperature variable.
-
-        Parameters:
-            subdomains: List of subdomains.
-
-        Returns:
-            Mixed-dimensional variable representing the solid temperature.
-
-        """
-        if len(domains) > 0 and all([isinstance(g, pp.BoundaryGrid) for g in domains]):
-            return self.create_boundary_operator(
-                name=self.solid_temperature_variable, domains=domains
-            )
-        else:
-            return self.equation_system.md_variable(
-                self.solid_temperature_variable, domains
-            )
-
-    def interface_fourier_flux(
-        self, interfaces: list[pp.MortarGrid]
-    ) -> pp.ad.MixedDimensionalVariable:
-        """Interface Fourier flux.
-
-        Parameters:
-            interfaces: List of interface grids.
-
-        Returns:
-            Variable representing the interface Fourier flux.
-
-        """
-        flux = self.equation_system.md_variable(
-            self.interface_fourier_flux_variable, interfaces
-        )
-        return flux
-
-    def interface_enthalpy_flux(
-        self, interfaces: list[pp.MortarGrid]
-    ) -> pp.ad.MixedDimensionalVariable:
-        """Interface enthalpy flux.
-
-        Parameters:
-            interfaces: List of interface grids.
-
-        Returns:
-            Variable representing the interface enthalpy flux.
-        """
-        flux = self.equation_system.md_variable(
-            self.interface_enthalpy_flux_variable, interfaces
-        )
-        return flux
-
-    def well_enthalpy_flux(
-        self, interfaces: list[pp.MortarGrid]
-    ) -> pp.ad.MixedDimensionalVariable:
-        """Well enthalpy flux.
-
-        Parameters:
-            interfaces: List of interface grids.
-
-        Returns:
-            Variable representing the well enthalpy flux.
-
-        """
-        flux = self.equation_system.md_variable(
-            self.well_enthalpy_flux_variable, interfaces
-        )
-        return flux
 
 
 class BoundaryConditionsEnergyBalanceLTD(pp.BoundaryConditionMixin):
@@ -1138,16 +1263,17 @@ class SolutionStrategyEnergyBalanceLTNE(pp.SolutionStrategy):
         in upstream weighting.
 
         """
+        op = self.energy_exchange_coefficient(self.mdg.subdomains())
         # Update parameters *before* the discretization matrices are re-computed.
         for sd, data in self.mdg.subdomains(return_data=True):
-            vals = self.darcy_flux([sd]).value(self.equation_system)
+            vals = self.equation_system.evaluate(self.darcy_flux([sd]))
             data[pp.PARAMETERS][self.enthalpy_keyword].update({"darcy_flux": vals})
 
         for intf, data in self.mdg.interfaces(return_data=True, codim=1):
-            vals = self.interface_darcy_flux([intf]).value(self.equation_system)
+            vals = self.equation_system.evaluate(self.interface_darcy_flux([intf]))
             data[pp.PARAMETERS][self.enthalpy_keyword].update({"darcy_flux": vals})
         for intf, data in self.mdg.interfaces(return_data=True, codim=2):
-            vals = self.well_flux([intf]).value(self.equation_system)
+            vals = self.equation_system.evaluate(self.well_flux([intf]))
             data[pp.PARAMETERS][self.enthalpy_keyword].update({"darcy_flux": vals})
 
         super().before_nonlinear_iteration()
@@ -1162,19 +1288,20 @@ class SolutionStrategyEnergyBalanceLTNE(pp.SolutionStrategy):
             self.interface_enthalpy_discretization(self.mdg.interfaces()).flux(),
         )
 
-    def update_boundary_values_primary_variables(self) -> None:
-        """Update boundary values for primary variables."""
 
-        self.update_boundary_values(
-            self.fluid_temperature_variable, self.fluid_temperature_bc
-        )
-        self.update_boundary_values(
-            self.solid_temperature_variable, self.solid_temperature_bc
-        )
+# SolutionStrategyEnergyBalanceLTNE = extend_class_with_methods(
+#     _SolutionStrategyEnergyBalanceLTNE,
+#     eb.SolutionStrategyEnergyBalance,
+#     [
+#         # "initial_condition",
+#         "before_nonlinear_iteration",
+#         "set_nonlinear_discretizations",
+#     ],
+# )
 
 
 class EnergyBalanceLTD(
-    EnergyBalanceEquationsLTNE,
+    # EnergyBalanceEquationsLTNE,
     ConstitutiveLawsLTNE,
     VariablesEnergyBalanceLTD,
     SolutionStrategyEnergyBalanceLTNE,
@@ -1191,34 +1318,12 @@ class VariablesMassAndEnergy(
 ):
     """Combines mass and momentum balance variables."""
 
-    def create_variables(self):
-        """Set the variables for the poromechanics problem.
-
-        Call all parent classes' set_variables methods.
-
-        """
-        # Energy balance and its parent mass balance
-        VariablesEnergyBalanceLTD.create_variables(self)
-        mass.VariablesSinglePhaseFlow.create_variables(self)
-
 
 class EquationsMassAndEnergy(
     EnergyBalanceEquationsLTNE,
     mass.FluidMassBalanceEquations,
 ):
     """Combines energy, mass and momentum balance equations."""
-
-    def set_equations(self) -> None:
-        """Set the equations for the problem.
-
-        Call all parent classes' set_equations methods.
-
-        """
-        # Call all super classes' set_equations methods. Do this explicitly (calling the
-        # methods of the super classes directly) instead of using super() since this is
-        # more transparent.
-        EnergyBalanceEquationsLTNE.set_equations(self)
-        mass.FluidMassBalanceEquations.set_equations(self)
 
 
 class SolutionStrategyMassAndEnergy(
@@ -1315,35 +1420,28 @@ class BoundaryConditionsMassAndEnergy(
             primary variables.
 
         """
-        mass.BoundaryConditionsSinglePhaseFlow.update_all_boundary_conditions(self)
+        super().update_all_boundary_conditions()
 
         # Update Neumann conditions
-        self.update_boundary_condition(
-            name=self.bc_data_fourier_flux_key, function=self.bc_values_fourier_flux
-        )
         self.update_boundary_condition(
             name=self.bc_data_solid_fourier_flux_key,
             function=self.bc_values_solid_fourier_flux,
         )
+
+    def update_boundary_values_primary_variables(self) -> None:
+        """Updates the solid temperature on the boundary, as the primary variable for energy."""
+        super().update_boundary_values_primary_variables()
         # Update Dirichlet conditions
-        self.update_boundary_condition(
-            name=self.fluid_temperature_variable,
-            function=self.bc_values_temperature,
-        )
         self.update_boundary_condition(
             name=self.solid_temperature_variable,
             function=self.bc_values_solid_temperature,
         )
 
-        self.update_boundary_condition(
-            name=self.bc_data_enthalpy_flux_key, function=self.bc_values_enthalpy_flux
-        )
 
-
-class NonzeroInitialCondition(pp.PorePyModel):
-    def initial_condition(self) -> None:
+class NonzeroInitialCondition(pp.InitialConditionMixin):
+    def set_initial_values_primary_variables(self) -> None:
         """Set the initial condition for the problem."""
-        super().initial_condition()
+        super().set_initial_values_primary_variables()
         for var in self.equation_system.variables:
             values = getattr(self, "ic_values_" + var.name)(var.domain)
             self.equation_system.set_variable_values(

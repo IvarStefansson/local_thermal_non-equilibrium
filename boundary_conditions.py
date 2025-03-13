@@ -18,17 +18,17 @@ class BoundaryConditionsMassAndEnergyDirWestEast(
 
     """
 
-    def in_faces(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def in_faces(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Faces with inflow boundary conditions."""
-        if boundary_grid.dim == self.nd - 2:
-            return self.domain_boundary_sides(boundary_grid).west
+        if bg.dim == self.nd - 2:
+            return self.domain_boundary_sides(bg).west
         else:
             return np.array([], dtype=int)
 
-    def out_faces(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def out_faces(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Faces with inflow boundary conditions."""
-        if boundary_grid.dim == self.nd - 1:
-            return self.domain_boundary_sides(boundary_grid).east
+        if bg.dim == self.nd - 1:
+            return self.domain_boundary_sides(bg).east
         else:
             return np.array([], dtype=int)
 
@@ -40,9 +40,8 @@ class BoundaryConditionsMassAndEnergyDirWestEast(
 
     @property
     def inflow_pressure(self):
-        return self.reference_variable_values.pressure + self.units.convert_units(
-            10, "Pa"
-        )
+        val = self.reference_variable_values.pressure
+        return val
 
     def dir_faces(self, sd):
         """Faces with Dirichlet boundary conditions."""
@@ -69,7 +68,7 @@ class BoundaryConditionsMassAndEnergyDirWestEast(
         # Define boundary condition on faces
         return pp.BoundaryCondition(sd, self.dir_faces(sd), "dir")
 
-    def bc_values_pressure(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def bc_values_pressure(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Boundary condition values for Darcy flux.
 
         Dirichlet boundary conditions are defined on the north and south boundaries,
@@ -82,10 +81,8 @@ class BoundaryConditionsMassAndEnergyDirWestEast(
             bc: Boundary condition object.
 
         """
-        vals = (
-            np.ones(boundary_grid.num_cells) * self.reference_variable_values.pressure
-        )
-        vals[self.in_faces(boundary_grid)] = self.inflow_pressure
+        vals = np.ones(bg.num_cells) * self.reference_variable_values.pressure
+        vals[self.in_faces(bg)] = self.inflow_pressure
         return vals
 
     def bc_type_fluid_flux(self, sd: pp.Grid) -> pp.BoundaryCondition:
@@ -146,49 +143,37 @@ class BoundaryConditionsMassAndEnergyDirWestEast(
         # Define boundary condition on faces
         return pp.BoundaryCondition(sd, self.dir_faces(sd), "dir")
 
-    def bc_values_temperature(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def bc_values_temperature(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Boundary condition values for the FLUID Fourier heat flux."""
         # Get density and viscosity values on boundary faces applying trace to
         # interior values.
         # Append to list of boundary values
-        vals = (
-            np.ones(boundary_grid.num_cells)
-            * self.reference_variable_values.temperature
-        )
-        vals[self.in_faces(boundary_grid)] = self.inflow_temperature
+        vals = np.ones(bg.num_cells) * self.reference_variable_values.temperature
+        vals[self.in_faces(bg)] = self.inflow_temperature
 
         return vals
 
-    def bc_values_solid_temperature(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def bc_values_solid_temperature(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Boundary condition values for the Fourier heat flux."""
         # Get density and viscosity values on boundary faces applying trace to
         # interior values.
         # Append to list of boundary values
-        vals = (
-            np.ones(boundary_grid.num_cells)
-            * self.reference_variable_values.temperature
-        )
+        vals = np.ones(bg.num_cells) * self.reference_variable_values.temperature
         return vals
 
 
-class NoFlow:
-    @property
-    def inflow_pressure(self):
-        return self.reference_variable_values.pressure
-
-
 class SingleDimBCs(BoundaryConditionsMassAndEnergyDirWestEast):
-    def in_faces(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def in_faces(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Faces with inflow boundary conditions."""
-        return self.domain_boundary_sides(boundary_grid).west
+        return self.domain_boundary_sides(bg).west
 
-    def out_faces(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def out_faces(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Faces with outflow boundary conditions."""
-        return self.domain_boundary_sides(boundary_grid).east
+        return self.domain_boundary_sides(bg).east
 
-    def dir_faces(self, boundary_grid: pp.BoundaryGrid) -> np.ndarray:
+    def dir_faces(self, bg: pp.BoundaryGrid) -> np.ndarray:
         """Faces with Dirichlet boundary conditions."""
-        return self.in_faces(boundary_grid) + self.out_faces(boundary_grid)
+        return self.in_faces(bg) + self.out_faces(bg)
 
 
 class NeumannSolidFourier:
@@ -208,7 +193,7 @@ class NeumannSolidFourier:
         return pp.BoundaryCondition(sd, cond="neu")
 
 
-class BCs3d(NoFlow, NeumannSolidFourier, SingleDimBCs):
+class BCs3d(NeumannSolidFourier, SingleDimBCs):
     def out_faces(self, grid: pp.Grid | pp.BoundaryGrid) -> np.ndarray:
         """Faces with outflow boundary conditions."""
         if isinstance(grid, pp.BoundaryGrid):

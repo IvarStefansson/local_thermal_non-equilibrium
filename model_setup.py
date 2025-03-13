@@ -1,6 +1,6 @@
 import porepy as pp
 
-from boundary_conditions import BCs3d, NoFlow, SingleDimBCs
+from boundary_conditions import BCs3d, SingleDimBCs
 from energy_balances import (
     FluidMassAndEnergyBalanceLTNE,
     NonzeroInitialCondition,
@@ -15,10 +15,6 @@ class SingleDimModel(  # type: ignore
     DataSaving,
     FluidMassAndEnergyBalanceLTNE,
 ):
-    pass
-
-
-class NoFlowModel(NoFlow, SingleDimModel):
     pass
 
 
